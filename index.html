@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neon Voronoi</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #000;
+            overflow: hidden;
+            font-family: 'Courier New', monospace;
+            color: #0ff;
+            text-shadow: 0 0 5px #0ff;
+            cursor: crosshair;
+        }
+        canvas { display: block; }
+        .controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.7);
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid rgba(0,255,255,0.3);
+            backdrop-filter: blur(5px);
+            z-index: 100;
+            user-select: none;
+            width: 220px;
+        }
+        .controls h2 {
+            margin-bottom: 12px;
+            font-size: 16px;
+            color: #0f0;
+            text-shadow: 0 0 10px #0f0;
+        }
+        .control-group {
+            margin-bottom: 10px;
+        }
+        .control-group label {
+            display: block;
+            font-size: 10px;
+            color: #ff0;
+            margin-bottom: 4px;
+        }
+        input[type="range"] {
+            width: 100%;
+            accent-color: #0ff;
+        }
+        .value-display {
+            float: right;
+            color: #fff;
+            font-weight: bold;
+            font-size: 11px;
+        }
+        .buttons {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        button {
+            flex: 1;
+            padding: 8px;
+            background: transparent;
+            border: 1px solid #0ff;
+            color: #0ff;
+            border-radius: 5px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 11px;
+            transition: all 0.2s;
+        }
+        button:hover {
+            background: rgba(0,255,255,0.1);
+            box-shadow: 0 0 10px rgba(0,255,255,0.3);
+        }
+        .stats {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            color: #f0f;
+            text-shadow: 0 0 8px #f0f;
+            font-size: 12px;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid rgba(255,0,255,0.3);
+        }
+        .instructions {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #888;
+            font-size: 12px;
+            text-align: center;
+            max-width: 500px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+
+    <div class="controls">
+        <h2>💎 NEON VORONOI</h2>
+
+        <div class="control-group">
+            <label>Seed Count <span class="value-display" id="countVal">15</span></label>
+            <input type="range" id="seedCount" min="2" max="50" value="15">
+        </div>
+
+        <div class="control-group">
+            <label>Move Speed <span class="value-display" id="speedVal">0.5</span></label>
+            <input type="range" id="moveSpeed" min="0" max="2" step="0.1" value="0.5">
+        </div>
+
+        <div class="control-group">
+            <label>Color Cycle <span class="value-display" id="colorSpeedVal">0.5</span></label>
+            <input type="range" id="colorSpeed" min="0" max="2" step="0.1" value="0.5">
+        </div>
+
+        <div class="buttons">
+            <button id="pauseBtn">Pause</button>
+            <button id="clearBtn">Clear</button>
+        </div>
+
+        <div class="buttons">
+            <button id="randomBtn">Randomize</button>
+        </div>
+    </div>
+
+    <div class="stats">
+        <div>Seeds: <span id="seedNum">0</span></div>
+        <div>FPS: <span id="fps">60</span></div>
+    </div>
+
+    <div class="instructions">
+        Voronoi diagram: each pixel colored by nearest seed. Seeds drift slowly. Click to add a new seed. Adjust seed count, speed, color cycle. Watch neon cells tessellate and shift.
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        // Controls
+        const countSlider = document.getElementById('seedCount');
+        const speedSlider = document.getElementById('moveSpeed');
+        const colorSpeedSlider = document.getElementById('colorSpeed');
+        const pauseBtn = document.getElementById('pauseBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const randomBtn = document.getElementById('randomBtn');
+
+        let width, height;
+        let running = true;
+        let lastTime = 0;
+        let frameCount = 0;
+        let lastFpsTime = 0;
+        let hueCycle = 0;
+        let frame = 0;
+
+        // Grid scale (pixel per cell)
+        const SCALE = 10; // each grid cell = 10 screen pixels
+        let cols, rows;
+        let gridCanvas = document.createElement('canvas');
+        let gridCtx = gridCanvas.getContext('2d');
+        let imgData = null; // Uint8ClampedArray reused
+
+        // Seeds
+        let seeds = [];
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            cols = Math.ceil(width / SCALE);
+            rows = Math.ceil(height / SCALE);
+            gridCanvas.width = cols;
+            gridCanvas.height = rows;
+            imgData = gridCtx.createImageData(cols, rows);
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // Precompute HSL->RGB palette for all hues (0-359) with S=1, L=0.5
+        const palette = new Uint8Array(360 * 3);
+        for (let h = 0; h < 360; h++) {
+            const [r,g,b] = hslToRgb(h/360, 1, 0.5);
+            palette[h*3] = r;
+            palette[h*3+1] = g;
+            palette[h*3+2] = b;
+        }
+
+        function hslToRgb(h, s, l) {
+            let r, g, b;
+            if (s === 0) {
+                r = g = b = l;
+            } else {
+                const hue2rgb = (p, q, t) => {
+                    if (t < 0) t += 1;
+                    if (t > 1) t -= 1;
+                    if (t < 1/6) return p + (q - p) * 6 * t;
+                    if (t < 1/2) return q;
+                    if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+                    return p;
+                };
+                const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+                const p = 2 * l - q;
+                r = hue2rgb(p, q, h + 1/3);
+                g = hue2rgb(p, q, h);
+                b = hue2rgb(p, q, h - 1/3);
+            }
+            return [Math.round(r*255), Math.round(g*255), Math.round(b*255)];
+        }
+
+        function createSeed() {
+            return {
+                x: Math.random() * width,
+                y: Math.random() * height,
+                vx: (Math.random() - 0.5) * 2,
+                vy: (Math.random() - 0.5) * 2,
+                hue: Math.random() * 360
+            };
+        }
+
+        function updateSeeds(speedMult) {
+            for (let s of seeds) {
+                s.x += s.vx * speedMult;
+                s.y += s.vy * speedMult;
+                // Bounce off edges
+                if (s.x < 0) { s.x = 0; s.vx *= -1; }
+                if (s.x > width) { s.x = width; s.vx *= -1; }
+                if (s.y < 0) { s.y = 0; s.vy *= -1; }
+                if (s.y > height) { s.y = height; s.vy *= -1; }
+            }
+        }
+
+        function computeVoronoi() {
+            const data = imgData.data;
+            const cols = gridCanvas.width;
+            const rows = gridCanvas.height;
+            const scale = SCALE;
+            const seedsArr = seeds;
+
+            for (let gy = 0; gy < rows; gy++) {
+                for (let gx = 0; gx < cols; gx++) {
+                    const cx = gx * scale + scale/2;
+                    const cy = gy * scale + scale/2;
+                    let minDistSq = Infinity;
+                    let nearestSeed = null;
+                    for (let s of seedsArr) {
+                        const dx = s.x - cx;
+                        const dy = s.y - cy;
+                        const distSq = dx*dx + dy*dy;
+                        if (distSq < minDistSq) {
+                            minDistSq = distSq;
+                            nearestSeed = s;
+                        }
+                    }
+                    const pixelIndex = (gy * cols + gx) * 4;
+                    if (nearestSeed) {
+                        const hue = (nearestSeed.hue + hueCycle) % 360;
+                        const pi = Math.floor(hue) * 3;
+                        data[pixelIndex] = palette[pi];
+                        data[pixelIndex+1] = palette[pi+1];
+                        data[pixelIndex+2] = palette[pi+2];
+                        data[pixelIndex+3] = 255;
+                    } else {
+                        data[pixelIndex+3] = 0; // transparent if no seeds (shouldn't happen)
+                    }
+                }
+            }
+            gridCtx.putImageData(imgData, 0, 0);
+        }
+
+        function render() {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, width, height);
+            ctx.drawImage(gridCanvas, 0, 0, width, height);
+        }
+
+        function animate(timestamp) {
+            const delta = timestamp - lastTime || 16;
+            lastTime = timestamp;
+
+            frameCount++;
+            if (timestamp - lastFpsTime >= 1000) {
+                document.getElementById('fps').textContent = frameCount;
+                frameCount = 0;
+                lastFpsTime = timestamp;
+            }
+
+            if (running) {
+                const moveSpeed = parseFloat(speedSlider.value);
+                updateSeeds(moveSpeed);
+                computeVoronoi();
+                render();
+                hueCycle = (hueCycle + parseFloat(colorSpeedSlider.value) * delta * 0.01) % 360;
+                document.getElementById('seedNum').textContent = seeds.length;
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        // Interactions
+        canvas.addEventListener('click', (e) => {
+            seeds.push(createSeedAt(e.clientX, e.clientY));
+            countSlider.value = seeds.length;
+            document.getElementById('countVal').textContent = seeds.length;
+        });
+
+        function createSeedAt(x, y) {
+            return {
+                x, y,
+                vx: (Math.random() - 0.5) * 2,
+                vy: (Math.random() - 0.5) * 2,
+                hue: Math.random() * 360
+            };
+        }
+
+        function updateDisplays() {
+            document.getElementById('countVal').textContent = countSlider.value;
+            document.getElementById('speedVal').textContent = speedSlider.value;
+            document.getElementById('colorSpeedVal').textContent = colorSpeedSlider.value;
+        }
+
+        const sliders = [countSlider, speedSlider, colorSpeedSlider];
+        sliders.forEach(s => s.addEventListener('input', () => {
+            updateDisplays();
+            const target = parseInt(countSlider.value);
+            if (s === countSlider) adjustSeedCount(target);
+        }));
+
+        function adjustSeedCount(target) {
+            const current = seeds.length;
+            if (target > current) {
+                for (let i = 0; i < target - current; i++) seeds.push(createSeed());
+            } else if (target < current) {
+                seeds.splice(target);
+            }
+        }
+
+        pauseBtn.addEventListener('click', () => {
+            running = !running;
+            pauseBtn.textContent = running ? "Pause" : "Resume";
+            if (running) animate(0);
+        });
+
+        clearBtn.addEventListener('click', () => {
+            seeds = [];
+            countSlider.value = 0;
+            updateDisplays();
+            // Clear grid to black
+            const data = imgData.data;
+            for (let i = 0; i < data.length; i += 4) {
+                data[i+3] = 0;
+            }
+            gridCtx.putImageData(imgData, 0, 0);
+            render();
+            document.getElementById('seedNum').textContent = 0;
+        });
+
+        randomBtn.addEventListener('click', () => {
+            countSlider.value = Math.floor(2 + Math.random() * 48);
+            speedSlider.value = (Math.random() * 2).toFixed(1);
+            colorSpeedSlider.value = (Math.random() * 2).toFixed(1);
+            updateDisplays();
+            adjustSeedCount(parseInt(countSlider.value));
+            // Randomize hues and velocities
+            for (let s of seeds) {
+                s.hue = Math.random() * 360;
+                s.vx = (Math.random() - 0.5) * 2;
+                s.vy = (Math.random() - 0.5) * 2;
+            }
+        });
+
+        // Init
+        updateDisplays();
+        adjustSeedCount(parseInt(countSlider.value));
+        animate(0);
+    </script>
+</body>
+</html>
